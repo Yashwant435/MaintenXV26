@@ -12,6 +12,60 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Assemble Android project from flat files
+        run: |
+          set -e
+          mkdir -p app/src/main/java/com/maintenx/app app/src/main/assets app/src/main/res/values app/src/main/res/xml app/src/main/res/drawable app/src/main/res/mipmap-anydpi-v26
+          mvf(){ if [ -f "$1" ]; then mv -f "$1" "$2"; fi; }
+          mvf AndroidManifest.xml app/src/main/AndroidManifest.xml
+          mvf MainActivity.java app/src/main/java/com/maintenx/app/MainActivity.java
+          mvf index.html app/src/main/assets/index.html
+          mvf colors.xml app/src/main/res/values/colors.xml
+          mvf strings.xml app/src/main/res/values/strings.xml
+          mvf styles.xml app/src/main/res/values/styles.xml
+          mvf file_paths.xml app/src/main/res/xml/file_paths.xml
+          mvf ic_foreground.xml app/src/main/res/drawable/ic_foreground.xml
+          mvf ic_launcher.xml app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.maintenx.app'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.maintenx.app'
+                  minSdk 29
+                  targetSdk 34
+                  versionCode 26
+                  versionName '26.0'
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.webkit:webkit:1.11.0'
+              implementation 'androidx.core:core:1.13.1'
+          }
+          EOF
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
