@@ -1496,4 +1496,129 @@ function v21Info(ti){if(!db.scrubberReadings?.length){alert('Save at least one s
  const r1=render;render=function(){r1.apply(this,arguments);try{mhDecorate()}catch(_){}};
 })();
 </script>
+<script>
+/* MaintenX v28: delete readings - scrubber + compressor (single, multi-select, delete all shown, undo) */
+(()=>{
+ const S={scrub:{mode:false,sel:new Set(),vis:[]},comp:{mode:false,sel:new Set(),vis:[]}};
+ const $=(t,c,x,f)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;if(f)e.onclick=f;return e};
+ let undoSnap=null,undoTimer=null;
+
+ /* ---------- styles ---------- */
+ const st=document.createElement('style');
+ st.textContent='#mxUndo{position:fixed;left:50%;bottom:92px;transform:translateX(-50%);display:none;align-items:center;gap:12px;background:#082d50;color:#fff;padding:9px 12px 9px 15px;border-radius:12px;font-size:12px;z-index:70;box-shadow:0 6px 20px #06274655;max-width:92vw}#mxUndo.show{display:flex}#mxUndo button{background:#fff;color:#082d50;border:0;border-radius:8px;padding:6px 11px;font-weight:700;font-size:12px;cursor:pointer}.mxsel{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:700;margin:0 0 8px;color:var(--navy)}.mxsel input{width:18px;height:18px}article.record.mxpicked{outline:2px solid var(--red)}.mxbar .btn[disabled]{opacity:.45}.mxdelrow{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}';
+ document.head.appendChild(st);
+
+ /* ---------- lookups ---------- */
+ const scrubExists=id=>(db.scrubberReadings||[]).some(r=>r.id===id);
+ const compExists=id=>(db.compressorLogs||[]).some(r=>r.id===id);
+ const scrubId=a=>{const b=a.querySelector('button[onclick^="viewScrub("]'),m=b&&b.getAttribute('onclick').match(/viewScrub\('([^']+)'\)/);let id=m?m[1]:'';if(!id){const p=a.querySelector('.recordhead p');id=p?p.textContent.split(' · ')[0].trim():''}return scrubExists(id)?id:''};
+ const compId=a=>{const p=a.querySelector('.recordhead p'),id=p?p.textContent.split(' · ')[0].trim():'';return compExists(id)?id:''};
+ const label=(k,id)=>{if(k==='scrub'){const r=db.scrubberReadings.find(x=>x.id===id);return r?`${r.date||''} · ${r.shift||''}`:id}const r=db.compressorLogs.find(x=>x.id===id);return r?`${r.compressor} · ${r.type} · ${r.date||''}`:id};
+ const ctx=()=>{
+  if(page==='scrubber'&&scrubTab==='history')return{k:'scrub',id:scrubId};
+  if(page==='moduleHistory'&&(moduleHistorySource==='scrubber'||moduleHistorySource==='reliability'))return{k:'scrub',id:scrubId};
+  if(page==='compressorHistory')return{k:'comp',id:compId};
+  return null;
+ };
+
+ /* ---------- compressor recalculation after deleting records ---------- */
+ function recompute(cid,types){
+  const c=(db.compressorAssets||[]).find(x=>x.id===cid);if(!c)return;
+  const seed=(typeof compressorSeed!=='undefined'?compressorSeed:[]).find(x=>x.id===cid)||{filters:[],currentHours:0};
+  const logs=db.compressorLogs.filter(l=>l.compressor===cid);
+  const best=arr=>arr.reduce((b,l)=>!b||String(l.date)>String(b.date)||(String(l.date)===String(b.date)&&+l.runningHours>=+b.runningHours)?l:b,null);
+  if(types.has('Running Hour Reading'))c.currentHours=Math.max(+seed.currentHours||0,...logs.filter(l=>l.type==='Running Hour Reading').map(l=>+l.runningHours||0));
+  c.filters.forEach(f=>{
+   if(!types.has(f.name))return;
+   const l=best(logs.filter(x=>x.type===f.name)),sf=(seed.filters||[]).find(x=>x.name===f.name);
+   if(l){f.lastHours=+l.runningHours;f.lastDate=l.date}else if(sf){f.lastHours=sf.lastHours;f.lastDate=sf.lastDate}
+   f.dueHours=f.lastHours+f.interval;
+  });
+  c.filters.forEach(f=>{f.remaining=f.dueHours-c.currentHours;f.status=f.remaining<=0?'CHANGE NOW':f.remaining<=200?'DUE SOON':'OK'});
+ }
+
+ /* ---------- delete + undo ---------- */
+ function remove(k,ids){
+  const set=new Set(ids);let n=0;
+  if(k==='scrub'){
+   undoSnap={k,rows:db.scrubberReadings.slice()};
+   db.scrubberReadings=db.scrubberReadings.filter(r=>{if(set.has(r.id)){n++;return false}return true});
+  }else{
+   undoSnap={k,assets:JSON.parse(JSON.stringify(db.compressorAssets)),rows:db.compressorLogs.slice()};
+   const aff={};
+   db.compressorLogs=db.compressorLogs.filter(l=>{if(set.has(l.id)){n++;(aff[l.compressor]||(aff[l.compressor]=new Set())).add(l.type);return false}return true});
+   Object.keys(aff).forEach(cid=>recompute(cid,aff[cid]));
+  }
+  S[k].sel.clear();save();render();
+  undoBar(n+(n>1?' records':' record')+' deleted');
+ }
+ function undoBar(msg){
+  let e=document.getElementById('mxUndo');if(!e){e=document.createElement('div');e.id='mxUndo';e.setAttribute('role','status');document.body.appendChild(e)}
+  e.innerHTML='';e.appendChild($('span',null,msg));e.appendChild($('button',null,'Undo',doUndo));e.className='show';
+  clearTimeout(undoTimer);undoTimer=setTimeout(()=>{e.className='';undoSnap=null},9000);
+ }
+ function doUndo(){
+  const u=undoSnap;if(!u)return;
+  if(u.k==='scrub')db.scrubberReadings=u.rows;else{db.compressorLogs=u.rows;db.compressorAssets=u.assets}
+  undoSnap=null;save();const e=document.getElementById('mxUndo');if(e)e.className='';render();v16Toast('Restored');
+ }
+ function ask(k,ids){
+  const n=ids.length;if(!n)return;
+  const noun=k==='scrub'?'scrubber reading':'compressor record';
+  let extra=k==='scrub'?'Photos attached to the reading are removed too.':'Running hours and filter due dates are recalculated from the remaining records.';
+  if(k==='comp'&&ids.some(id=>String(id).startsWith('IMP-')))extra+=' Imported baseline records fall back to the workbook values in the status table.';
+  const what=n===1?`<b>${esc(label(k,ids[0]))}</b>`:`these <b>${n}</b> ${noun}s`;
+  showModal('Delete '+(n>1?n+' '+noun+'s':noun)+'?',`<p style="font-size:13px;line-height:1.5;margin:0 0 6px">Delete ${what} from this device? ${esc(extra)}</p><p class="sub">You can undo right after deleting.</p><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn danger" id="mxGo">Delete${n>1?' '+n:''}</button></div>`);
+  document.getElementById('mxGo').onclick=()=>{closeModal();remove(k,ids)};
+ }
+
+ /* ---------- page decoration ---------- */
+ function decorate(){
+  const app=document.getElementById('app');if(!app)return;
+  if(page==='compressors'){decorateMon(app);return}
+  const c=ctx();if(!c)return;
+  const s=S[c.k],arts=[...app.querySelectorAll('article.record')].map(a=>({a,id:c.id(a)})).filter(x=>x.id);
+  s.vis=arts.map(x=>x.id);
+  [...s.sel].forEach(id=>{if(!s.vis.includes(id))s.sel.delete(id)});
+  const list=app.querySelector('.cardlist');
+  if(list&&arts.length){
+   const bar=$('div','panel section mxbar'),row=$('div','row');row.style.cssText='gap:7px;flex-wrap:wrap;align-items:center';
+   row.appendChild($('button','btn secondary small',s.mode?'✓ Done selecting':'☑ Select',()=>{s.mode=!s.mode;s.sel.clear();render()}));
+   if(s.mode){
+    row.appendChild($('button','btn secondary small','Select all ('+s.vis.length+')',()=>{s.vis.forEach(id=>s.sel.add(id));render()}));
+    row.appendChild($('button','btn ghost small','Clear',()=>{s.sel.clear();render()}));
+    const b=$('button','btn danger small','🗑 Delete selected ('+s.sel.size+')',()=>ask(c.k,[...s.sel]));if(!s.sel.size)b.disabled=true;row.appendChild(b);
+   }
+   row.appendChild($('button','btn danger small','🗑 Delete all shown ('+s.vis.length+')',()=>ask(c.k,s.vis.slice())));
+   bar.appendChild(row);
+   if(s.mode){const h=$('p','sub','Tick the records to remove, then tap Delete selected.');h.style.margin='8px 0 0';bar.appendChild(h)}
+   list.parentNode.insertBefore(bar,list);
+  }
+  arts.forEach(({a,id})=>{
+   if(s.mode){
+    const lab=$('label','mxsel'),cb=document.createElement('input');cb.type='checkbox';cb.checked=s.sel.has(id);
+    cb.onchange=()=>{cb.checked?s.sel.add(id):s.sel.delete(id);a.classList.toggle('mxpicked',cb.checked);render()};
+    lab.appendChild(cb);lab.appendChild($('span',null,'Select this record'));a.insertBefore(lab,a.firstChild);
+    a.classList.toggle('mxpicked',s.sel.has(id));
+   }
+   const host=a.querySelector('.recordfoot')||a.querySelector(':scope > .row:last-child');
+   const btn=$('button','btn danger small','🗑 Delete',()=>ask(c.k,[id]));
+   if(host){btn.style.marginLeft='6px';host.appendChild(btn)}else{const r=$('div','mxdelrow');r.appendChild(btn);a.appendChild(r)}
+  });
+ }
+ function decorateMon(app){
+  app.querySelectorAll('article.record').forEach(a=>{
+   const h=a.querySelector('h3'),cid=h?h.textContent.trim():'';
+   if(!(db.compressorAssets||[]).some(x=>x.id===cid))return;
+   const foot=a.querySelector('.recordfoot');if(!foot)return;
+   foot.appendChild($('button','btn danger small','🗑 Delete last entry',()=>{
+    const last=db.compressorLogs.filter(l=>l.compressor===cid).reduce((b,l)=>!b||String(l.date)>=String(b.date)?l:b,null);
+    if(!last){v16Toast('No records to delete for '+cid);return}
+    ask('comp',[last.id]);
+   }));
+  });
+ }
+ const r0=render;render=function(){r0.apply(this,arguments);try{decorate()}catch(e){console.error('v28',e)}};
+})();
+</script>
 </body></html>
