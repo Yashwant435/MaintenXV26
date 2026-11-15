@@ -511,7 +511,7 @@ function saveScrub(e){
  save();scrubTab='history';render();});
 }
 function scrubHistory(){
- return `<div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:10px"><button class="btn secondary small" onclick="exportScrubCSV()">Export Excel-compatible CSV</button><button class="btn small" onclick="showScrubExportOptions()">Choose Dashboard to Export</button></div><div class="cardlist">${db.scrubberReadings.map(r=>{let n=scrubberPoints.filter(([p,a])=>sState(r.values[sKey(p,a)],sKey(p,a))==='Alarm').length;return `<article class="record"><h3>${r.date} · ${r.shift}</h3><p>${r.person} · ${r.id}</p><p>${r.status} · ${r.rpm||'—'} RPM · ${r.current||'—'} A · ${r.feed||'—'} TPH</p><p>${n} alarm points · ${r.photos?.length||0} photos</p><p>${r.remarks||''}</p><button class="btn secondary small" onclick="viewScrub('${r.id}')">View readings</button></article>`}).join('')||'<div class="panel empty">No readings saved yet.</div>'}</div>`;
+ return `<div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:10px"><button class="btn secondary small" onclick="exportScrubCSV()">Export Excel-compatible CSV</button><button class="btn small" onclick="showScrubExportOptions()">Choose Dashboard to Export</button></div><div class="cardlist">${db.scrubberReadings.map(r=>{let n=scrubberPoints.filter(([p,a])=>sState(r.values[sKey(p,a)],sKey(p,a))==='Alarm').length;return `<article class="record"><h3>${r.date} · ${r.shift}</h3><p>${r.person} · ${r.id}</p><p>${r.status} · ${r.rpm||'—'} RPM · ${r.current||'—'} A · ${r.feed||'—'} TPH</p><p>${n} alarm points · ${r.photos?.length||0} photos</p><p>${r.remarks||''}</p><div class="row" style="gap:7px;flex-wrap:wrap"><button class="btn secondary small" onclick="viewScrub('${r.id}')">View readings</button><button class="btn small" onclick="scrubPickDash('${r.id}')">⬇ Dashboard</button><button class="btn secondary small" onclick="scrubCsvOne('${r.id}')">⬇ CSV</button></div></article>`}).join('')||'<div class="panel empty">No readings saved yet.</div>'}</div>`;
 }
 function viewScrub(id){
  let r=db.scrubberReadings.find(x=>x.id===id);
@@ -528,7 +528,7 @@ function exportScrubCSV(){
  const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='MaintenX_Scrubber_Daily_Readings.csv';a.click();URL.revokeObjectURL(url);
 }
 function exportScrubReferenceDashboard(){
- const readings=[...db.scrubberReadings].sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+ const readings=scrubChron();
  const r=readings[readings.length-1];
  if(!r){alert('Save at least one scrubber reading before exporting the dashboard.');return;}
  const escHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -630,7 +630,7 @@ function openScrubReportWindow(title,body,style=''){
  w.document.close();
 }
 function exportScrubClassicDashboard(){
- const readings=[...db.scrubberReadings].sort((a,b)=>(a.date||'').localeCompare(b.date||'')),r=readings[readings.length-1];if(!r){alert('Save at least one scrubber reading first.');return;}
+ const readings=scrubChron(),r=readings[readings.length-1];if(!r){alert('Save at least one scrubber reading first.');return;}
  const esc=s=>String(s??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  const pts=scrubberPoints.map(([p,a])=>({p,a,v:r.values?.[sKey(p,a)]??'',st:sState(r.values?.[sKey(p,a)]??'',sKey(p,a))}));
  const groups=[['DRIVE SYSTEM',pts.filter(x=>['Motor DE','Motor NDE','Gearbox Input','Gearbox Output','Pinion DE','Pinion NDE'].includes(x.p))],['SUPPORT ROLLERS',pts.filter(x=>x.p.startsWith('SR-'))]];
@@ -652,7 +652,7 @@ function exportScrubClassicDashboard(){
  openScrubReportWindow('MaintenX · Scrubber Classic Inspection',body,style);
 }
 function exportScrubAnalyticsDashboard(){
- const readings=[...db.scrubberReadings].sort((a,b)=>(a.date||'').localeCompare(b.date||'')),r=readings[readings.length-1];if(!r){alert('Save at least one scrubber reading first.');return;}
+ const readings=scrubChron(),r=readings[readings.length-1];if(!r){alert('Save at least one scrubber reading first.');return;}
  const esc=s=>String(s??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  const pts=scrubberPoints.map(([p,a])=>({p,a,v:r.values?.[sKey(p,a)]??'',st:sState(r.values?.[sKey(p,a)]??'',sKey(p,a))}));
  const count=k=>pts.filter(x=>x.st===k).length,filled=pts.filter(x=>x.v!==''&&x.v!=null).length,alerts=pts.filter(x=>x.st==='Warning'||x.st==='Alarm');
@@ -677,7 +677,7 @@ function exportScrubAnalyticsDashboard(){
 
 
 function reliabilityCentrePage(){
- const readings=[...db.scrubberReadings].sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+ const readings=scrubChron();
  const r=readings[readings.length-1],latest=r?.values||{};
  const statusFor=(p,a)=>sState(latest[sKey(p,a)]??'',sKey(p,a));
  const groups=[{name:'Motor',points:['Motor DE','Motor NDE']},{name:'Gearbox',points:['Gearbox Input','Gearbox Output']},{name:'Pinion',points:['Pinion DE','Pinion NDE']},...['SR-1','SR-2','SR-3','SR-4'].map(x=>({name:x,points:[x+' Feed Side',x+' Discharge Side']}))];
@@ -1418,6 +1418,82 @@ function v21Info(ti){if(!db.scrubberReadings?.length){alert('Save at least one s
  /* header status follows the real connection state */
  const upd=()=>{const o=document.querySelector('.topright .online');if(!o)return;const on=navigator.onLine;o.textContent=on?'● Online':'● Offline';o.classList.toggle('off',!on)};
  addEventListener('online',upd);addEventListener('offline',upd);upd();
+})();
+</script>
+<script>
+/* ===== History page exports (records list, reading data, dashboards) ===== */
+(()=>{
+ const READ=['scrubber','reliability','pumpReliability','millReliability'];
+ const rowsNow=()=>moduleHistoryRecords(moduleHistorySource).filter(x=>(!moduleHistoryFrom||x.date>=moduleHistoryFrom)&&(!moduleHistoryTo||x.date<=moduleHistoryTo)&&(moduleHistoryStatus==='All'||x.status===moduleHistoryStatus)&&(moduleHistoryAsset==='All'||x.asset===moduleHistoryAsset)&&(moduleHistoryTechnician==='All'||x.technician===moduleHistoryTechnician)&&(moduleHistoryType==='All'||x.type===moduleHistoryType)&&(x.title+' '+x.id+' '+x.asset+' '+x.technician+' '+x.type+' '+x.detail).toLowerCase().includes(moduleHistorySearch.toLowerCase())).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
+ const fname=suffix=>'MaintenX_'+moduleHistoryTitle(moduleHistorySource).replace(/[^A-Za-z0-9]+/g,'_').replace(/^_|_$/g,'')+'_'+suffix+'_'+new Date().toISOString().slice(0,10)+'.csv';
+ const flat=o=>{const out={};const walk=(v,p)=>{if(v==null)return;if(Array.isArray(v)){if(/(^|\.)photos?$/.test(p)){out[p+' (count)']=v.length;return}out[p]=v.map(x=>typeof x==='object'?JSON.stringify(x):x).join('; ');return}if(typeof v==='object'){Object.keys(v).forEach(k=>walk(v[k],p?p+'.'+k:k));return}if(typeof v==='string'&&v.slice(0,5)==='data:'){out[p]='[embedded image]';return}out[p]=v};walk(o,'');return out};
+ window.mhExportList=function(){
+  const rows=rowsNow();if(!rows.length){alert('No records to export. Change or reset the filters first.');return}
+  downloadCSV([['Record ID','Title','Date','Equipment / area','Status / severity','Technician','Work type','Details'],...rows.map(x=>[x.id,x.title,x.date,x.asset,x.status,x.technician,x.type,x.detail])],fname('Records'));
+ };
+ window.mhExportData=function(){
+  const rows=rowsNow();if(!rows.length){alert('No records to export. Change or reset the filters first.');return}
+  const k=moduleHistorySource;
+  if(k==='scrubber'||k==='reliability'){
+   const cols=['date','shift','person','status','rpm','current','feed','remarks'],pts=scrubberPoints.map(([p,a])=>sKey(p,a));
+   const head=[...cols,...pts.map(x=>x.replace('|',' · '))];
+   downloadCSV([head,...rows.map(x=>{const r=x.raw||{};return [...cols.map(c=>r[c]),...pts.map(c=>r.values?.[c])]})],fname('Readings'));
+   return;
+  }
+  const flats=rows.map(x=>flat(x.raw||{}));const cols=[];flats.forEach(o=>Object.keys(o).forEach(c=>{if(!cols.includes(c))cols.push(c)}));
+  downloadCSV([cols,...flats.map(o=>cols.map(c=>o[c]))],fname(READ.includes(k)?'Readings':'Full_Data'));
+ };
+ window.mhExportBar=function(){
+  const k=moduleHistorySource,isRead=READ.includes(k),isScrub=k==='scrubber'||k==='reliability';
+  return `<div class="panel section"><div class="section-title"><h2>Export</h2><span class="sub">Uses the filters above</span></div><div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn small" onclick="mhExportList()">⬇ Records list (CSV)</button><button class="btn secondary small" onclick="mhExportData()">⬇ ${isRead?'Reading data (CSV)':'Full record data (CSV)'}</button>${isScrub?'<button class="btn small" onclick="showScrubExportOptions()">⬇ Latest dashboard (PDF)</button>':''}</div>${isScrub?'<p class="sub" style="margin:8px 0 0">The dashboard button above uses the newest reading. To export the dashboard of any other reading, use the ⬇ Dashboard button on that reading below.</p>':''}</div>`;
+ };
+
+ /* ---- per-reading exports ---- */
+ const ts=r=>+String(r&&r.id||'').replace(/\D/g,'')||0;
+ window.scrubChron=()=>[...(db.scrubberReadings||[])].sort((a,b)=>(a.date||'').localeCompare(b.date||'')||ts(a)-ts(b));
+ /* run a dashboard function as if the chosen reading were the latest (history = readings up to it) */
+ window.scrubWith=function(id,fn){
+  const orig=db.scrubberReadings,chron=scrubChron(),i=chron.findIndex(r=>r.id===id);
+  if(i<0){fn();return}
+  db.scrubberReadings=chron.slice(0,i+1).reverse();
+  try{fn()}finally{db.scrubberReadings=orig}
+ };
+ window.scrubPickDash=function(id){
+  const r=(db.scrubberReadings||[]).find(x=>x.id===id);if(!r)return;
+  showScrubExportOptions();
+  const w=document.getElementById('scrub-export-picker');if(!w)return;
+  w.querySelectorAll('button[onclick]').forEach(b=>{
+   const oc=b.getAttribute('onclick'),m=oc.match(/^\s*([A-Za-z0-9_]+\([^)]*\))\s*;([\s\S]*)$/);
+   if(m&&!/picker'\)\.remove\(\)$/.test(m[1]))b.setAttribute('onclick',"scrubWith('"+id+"',()=>"+m[1]+");"+m[2]);
+  });
+  const sub=[...w.querySelectorAll('div')].find(d=>/latest saved scrubber inspection/.test(d.textContent)&&d.children.length===0);
+  if(sub)sub.textContent='Dashboard for the reading of '+(r.date||'—')+' · '+(r.shift||'—')+' · '+(r.person||'—')+' ('+r.id+')';
+  const note=[...w.querySelectorAll('div')].find(d=>/same latest saved readings/.test(d.textContent)&&d.children.length===0);
+  if(note)note.textContent='Trends and history in these dashboards run up to this reading. Choose Print / Save as PDF in the report window.';
+ };
+ window.scrubCsvOne=function(id){
+  const r=(db.scrubberReadings||[]).find(x=>x.id===id);if(!r)return;
+  const cols=['date','shift','person','status','rpm','current','feed','remarks'],pts=scrubberPoints.map(([p,a])=>sKey(p,a));
+  downloadCSV([[...cols,...pts.map(x=>x.replace('|',' · '))],[...cols.map(c=>r[c]),...pts.map(c=>r.values?.[c])]],'MaintenX_Scrubber_Reading_'+(r.date||'')+'_'+String(r.shift||'').replace(/[^A-Za-z0-9]+/g,'_')+'_'+ts(r)+'.csv');
+ };
+ const h0=moduleHistoryPage;
+ moduleHistoryPage=function(){const html=h0.apply(this,arguments),bar=mhExportBar(),i=html.indexOf('<div class="cardlist">');return i<0?html+bar:html.slice(0,i)+bar+html.slice(i)};
+ /* richer scrubber cards: key readings summary + View readings button */
+ window.mhDecorate=function(){
+  if(page!=='moduleHistory'||(moduleHistorySource!=='scrubber'&&moduleHistorySource!=='reliability'))return;
+  document.querySelectorAll('#app article.record').forEach(a=>{
+   const p=a.querySelector('.recordhead p');if(!p||a.dataset.mx)return;a.dataset.mx='1';
+   const id=p.textContent.split(' · ')[0].trim(),r=(db.scrubberReadings||[]).find(x=>x.id===id);if(!r)return;
+   const st=w=>scrubberPoints.filter(([pp,aa])=>sState(r.values?.[sKey(pp,aa)],sKey(pp,aa))===w).length;
+   const info=document.createElement('p');info.textContent=(r.rpm||'—')+' RPM · '+(r.current||'—')+' A · '+(r.feed||'—')+' TPH · '+st('Alarm')+' alarm · '+st('Warning')+' warning · '+((r.photos||[]).length)+' photos';
+   const foot=a.querySelector('.recordfoot');if(foot)a.insertBefore(info,foot);else a.appendChild(info);
+   const bar=document.createElement('div');bar.className='row';bar.style.cssText='gap:7px;flex-wrap:wrap;margin-top:6px';
+   const mk=(t,cls,fn)=>{const b=document.createElement('button');b.className='btn '+cls+' small';b.textContent=t;b.onclick=fn;bar.appendChild(b)};
+   mk('View readings','secondary',()=>viewScrub(id));mk('⬇ Dashboard','',()=>scrubPickDash(id));mk('⬇ CSV','secondary',()=>scrubCsvOne(id));
+   if(foot)a.insertBefore(bar,foot);else a.appendChild(bar);
+  });
+ };
+ const r1=render;render=function(){r1.apply(this,arguments);try{mhDecorate()}catch(_){}};
 })();
 </script>
 </body></html>
