@@ -1770,4 +1770,317 @@ function v21Info(ti){if(!db.scrubberReadings?.length){alert('Save at least one s
  const r0=render;render=function(){W.total=(db.orders||[]).length;r0.apply(this,arguments);try{decorate()}catch(e){console.error('v29',e)}};
 })();
 </script>
+<script>
+/* MaintenX v30: scrubber reading cells accept decimals AND ranges such as 1.6-2.3 */
+(()=>{
+ /* parse one cell: returns {ok, num, text}. A range keeps the typed text, and the higher value drives alarm/warning status. */
+ const NUM='(\\d+(?:\\.\\d+)?|\\.\\d+)';
+ const reOne=new RegExp('^'+NUM+'$'),reRange=new RegExp('^'+NUM+'\\s*-\\s*'+NUM+'$');
+ function parseCell(raw){
+  const t=String(raw==null?'':raw).trim().replace(/[–—]/g,'-').replace(/,/g,'.');
+  if(!t)return{ok:true,num:'',text:''};
+  if(reOne.test(t))return{ok:true,num:t,text:''};
+  const m=t.match(reRange);
+  if(m){const a=parseFloat(m[1]),b=parseFloat(m[2]);return{ok:true,num:String(Math.max(a,b)),text:parseFloat(m[1])+'-'+parseFloat(m[2])}}
+  return{ok:false};
+ }
+ /* make every scrubber vibration cell a text box with a decimal keypad that allows digits, one or two dots and a dash */
+ const isCell=el=>el&&el.tagName==='INPUT'&&typeof el.name==='string'&&el.name.includes('|')&&/\((?:mm\/s)\)/.test((el.previousElementSibling&&el.previousElementSibling.textContent)||'');
+ function fix(root){
+  (root.querySelectorAll?root.querySelectorAll('input[name*="|"]'):[]).forEach(el=>{
+   if(el.dataset.v30||!isCell(el))return;
+   el.dataset.v30='1';el.type='text';el.setAttribute('inputmode','decimal');el.setAttribute('autocomplete','off');el.placeholder='e.g. 1.6 or 1.6-2.3';
+   el.removeAttribute('min');el.removeAttribute('step');
+   el.addEventListener('input',()=>{
+    const c=el.value.replace(/[–—]/g,'-').replace(/,/g,'.').replace(/[^0-9.\-]/g,'');
+    if(c!==el.value)el.value=c;
+   });
+  });
+ }
+ new MutationObserver(ms=>{ms.forEach(m=>m.addedNodes.forEach(n=>{if(n.nodeType===1)fix(n)}))}).observe(document.body,{childList:true,subtree:true});
+ fix(document);
+
+ /* save: same as before, plus range support (original typed text kept in valuesText) */
+ saveScrub=function(e){
+  e.preventDefault();const form=e.target,f=new FormData(form),person=String(f.get('person')||'').trim(),date=f.get('date');
+  if(!date||!person){const k=!date?'date':'person',el=form.elements[k];v16Toast(!date?'Enter the date first.':'Enter the technician / engineer name first.');if(el){el.scrollIntoView({block:'center'});el.focus()}return}
+  const values={},valuesText={};
+  for(const [p,a] of scrubberPoints){
+   const k=sKey(p,a),c=parseCell(f.get(k));
+   if(!c.ok){const el=form.elements[k];v16Toast('Check '+p+' · '+a+': use a number like 1.6 or a range like 1.6-2.3.');if(el){el.scrollIntoView({block:'center'});el.focus()}return}
+   values[k]=c.num;if(c.text)valuesText[k]=c.text;
+  }
+  const files=[...(form.elements.photos?.files||[])].slice(0,3),btn=form.querySelector('button[type=submit]'),txt=btn?btn.textContent:'';
+  if(btn){btn.disabled=true;btn.textContent='Saving…'}
+  const fail=m=>{if(btn){btn.disabled=false;btn.textContent=txt}v16Toast(m)};
+  Promise.all(files.map(x=>v17Img(x).catch(()=>null))).then(ph=>{let photos=ph.filter(Boolean);
+   const rec=()=>{const r={id:'SCR-'+Date.now(),date,shift:f.get('shift'),person,status:f.get('status'),rpm:f.get('rpm'),current:f.get('current'),feed:f.get('feed'),remarks:f.get('remarks'),values,photos};if(Object.keys(valuesText).length)r.valuesText=valuesText;return r};
+   const tryPut=()=>{db.scrubberReadings.unshift(rec());try{localStorage.setItem('maintenx_db',JSON.stringify(db));return true}catch(x){db.scrubberReadings.shift();return false}};
+   let ok=tryPut(),dropped=false;if(!ok&&photos.length){photos=[];dropped=true;ok=tryPut()}
+   if(!ok){fail('NOT saved: phone storage is full. Open More, download a backup, then delete old photos.');return}
+   v16Toast(dropped?'Saved without photos (storage nearly full).':files.length&&ph.some(x=>!x)?'Saved. Some photos could not be read.':'Reading saved');scrubTab='history';render()
+  }).catch(()=>fail('Could not save. Please try again.'))
+ };
+
+ /* reading detail shows the range exactly as typed */
+ viewScrub=function(id){
+  const r=db.scrubberReadings.find(x=>x.id===id);if(!r)return;
+  showModal('Scrubber readings',scrubberPoints.map(([p,a])=>{const k=sKey(p,a),v=r.values[k],t=r.valuesText&&r.valuesText[k];return `<p>${p} · ${a}: <b>${t?esc(t):(v||'--')} mm/s</b> ${pill(sState(v,k))}${t?` <span class="sub">(status uses ${esc(v)})</span>`:''}</p>`}).join('')+`<p>${esc(r.remarks||'')}</p>`+(r.photos||[]).map(x=>`<img src="${x}" style="max-width:100%">`).join(''));
+ };
+})();
+</script>
+<script>
+/* MaintenX v31: Scrubber TEMPERATURE reading option (entry, history, status report, delete, filter, share) */
+(()=>{
+ const T={from:'',to:'',mode:false,sel:new Set()};
+ let undoSnap=null,undoTimer=null;
+ const TEMPTABS=['tempEntry','tempHistory'];
+ const lim=()=>Object.assign({warning:70,alarm:80},db.scrubberTempLimits||{});
+ const list=()=>(db.scrubberTemps=db.scrubberTemps||[]);
+ const TP=[['pinionDE','Pinion DE'],['pinionNDE','Pinion NDE'],['t1fp_a','T-1 F/D towards FP · reading 1'],['t1fp_b','T-1 F/D towards FP · reading 2'],['t1pt_a','T-1 F/D towards PT · reading 1'],['t1pt_b','T-1 F/D towards PT · reading 2'],['t2fp_a','T-2 F/D towards FP · reading 1'],['t2fp_b','T-2 F/D towards FP · reading 2'],['t2pt_a','T-2 F/D towards PT · reading 1'],['t2pt_b','T-2 F/D towards PT · reading 2']];
+ const tState=v=>v===''||v==null||isNaN(+v)?'Not entered':(+v>=lim().alarm?'Alarm':+v>=lim().warning?'Warning':'Normal');
+ const worst=r=>{let m=null;TP.forEach(([k])=>{const v=r.temps&&r.temps[k];if(v!==''&&v!=null&&!isNaN(+v))m=m==null?+v:Math.max(m,+v)});return m};
+ const overall=r=>{const m=worst(r);return m==null?'Not entered':tState(m)};
+ const col=s=>s==='Alarm'?'#c24141':s==='Warning'?'#b7791f':s==='Normal'?'#16845b':'#6b7f90';
+ const badge=s=>`<span style="display:inline-block;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:800;color:#fff;background:${col(s)}">${s}</span>`;
+ const dmy=d=>String(d||'').split('-').reverse().join('/');
+ const t12=t=>{if(!t)return '';const [h,m]=t.split(':');const H=+h;return ((H%12)||12)+':'+m+' '+(H<12?'AM':'PM')};
+ const pair=(a,b)=>(a===''||a==null)&&(b===''||b==null)?'--':`${a===''||a==null?'--':a} / ${b===''||b==null?'--':b}`;
+ const $=(t,c,x,f)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;if(f)e.onclick=f;return e};
+ /* vibration cells: number or range (higher value used) */
+ const NUM='(\\d+(?:\\.\\d+)?|\\.\\d+)',reOne=new RegExp('^'+NUM+'$'),reRange=new RegExp('^'+NUM+'\\s*-\\s*'+NUM+'$');
+ const parseV=raw=>{const t=String(raw==null?'':raw).trim().replace(/[–—]/g,'-').replace(/,/g,'.');if(!t)return{ok:true,num:'',text:''};if(reOne.test(t))return{ok:true,num:t,text:''};const m=t.match(reRange);if(m)return{ok:true,num:String(Math.max(+m[1],+m[2])),text:(+m[1])+'-'+(+m[2])};return{ok:false}};
+
+ const st=document.createElement('style');
+ st.textContent='.trpt{border:2px solid #1d4fa3;border-radius:14px;overflow:hidden;font-size:12px;background:#fff;color:#12263a}.trpt .hd{background:#0f3f8f;color:#fff;text-align:center;font-weight:800;padding:9px;font-size:14px}.trpt .meta{display:flex;justify-content:space-between;gap:6px;padding:6px 10px;background:#eaf2fb;font-weight:700;color:#0f3f8f;flex-wrap:wrap}.trpt .sec{background:#0f3f8f;color:#fff;font-weight:800;padding:5px 10px;margin-top:8px}.trpt .r{display:flex;justify-content:space-between;gap:8px;padding:6px 10px;border-bottom:1px solid #e3edf7;align-items:center}.trpt .v{font-weight:800;padding:2px 10px;border-radius:8px;background:#e6f6e6;color:#14532d;white-space:nowrap}.trpt .v.Warning{background:#fff3d6;color:#8a5a00}.trpt .v.Alarm{background:#fde3e3;color:#9b1c1c}.trpt .foot{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 10px;background:#0f3f8f;color:#fff;font-weight:800;margin-top:8px;flex-wrap:wrap}.trpt .foot span{background:#16845b;border-radius:8px;padding:3px 10px}.trpt .foot span.Warning{background:#b7791f}.trpt .foot span.Alarm{background:#c24141}.tmpgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px;font-size:12px;margin:6px 0}.tmpgrid b{color:var(--navy)}';
+ document.head.appendChild(st);
+
+ /* ---------- page ---------- */
+ function tabs(){return `<div class="panel section"><div class="row" style="gap:7px;flex-wrap:wrap">${[['entry','Daily Entry'],['history','History'],['trends','Trends'],['limits','Alarm Limits'],['tempEntry','🌡 Temp Entry'],['tempHistory','🌡 Temp History']].map(([k,l])=>`<button class="btn ${scrubTab===k?'':'secondary'} small" onclick="scrubTab='${k}';render()">${l}</button>`).join('')}</div></div>`}
+ function inp(name,label,extra=''){return `<div class="field"><label>${label}</label><input name="${name}" type="number" inputmode="decimal" min="0" step="0.1" ${extra}></div>`}
+ function entry(){
+  const L=lim(),nowT=new Date().toTimeString().slice(0,5);
+  return `<form class="panel section" onsubmit="mxT.save(event)"><div class="formgrid">
+  <div class="field"><label>Date</label><input name="date" type="date" required value="${v17Today()}"></div>
+  <div class="field"><label>Shift</label><select name="shift"><option>A Shift</option><option>B Shift</option><option>C Shift</option><option>General</option></select></div>
+  <div class="field"><label>Time</label><input name="time" type="time" value="${nowT}"></div>
+  <div class="field"><label>Technician / Engineer</label><input name="person" required></div>
+  <div class="field full"><label>Scrubber status</label><input name="status" list="mxTStat" value="Running at up side" placeholder="e.g. Running at up side"><datalist id="mxTStat"><option>Running at up side</option><option>Running at down side</option><option>Running normal</option><option>Stopped</option><option>Under maintenance</option></datalist></div></div>
+  <div class="section"><h3>Pinion temperature (°C)</h3><div class="formgrid">${inp('pinionDE','DE')}${inp('pinionNDE','NDE')}</div></div>
+  <div class="section"><h3>T-1 support roller bearing block (°C)</h3><div class="formgrid">${inp('t1fp_a','F/D towards FP · reading 1')}${inp('t1fp_b','F/D towards FP · reading 2')}${inp('t1pt_a','F/D towards PT · reading 1')}${inp('t1pt_b','F/D towards PT · reading 2')}</div></div>
+  <div class="section"><h3>T-2 support roller bearing block (°C)</h3><div class="formgrid">${inp('t2fp_a','F/D towards FP · reading 1')}${inp('t2fp_b','F/D towards FP · reading 2')}${inp('t2pt_a','F/D towards PT · reading 1')}${inp('t2pt_b','F/D towards PT · reading 2')}</div></div>
+  <div class="section"><h3>Vibration monitoring (mm/s)</h3><div class="formgrid"><div class="field"><label>Gear box vibration</label><input name="gbVib" inputmode="decimal" placeholder="e.g. 2.04 or 1.6-2.3"></div><div class="field"><label>Pinion vibration</label><input name="pnVib" inputmode="decimal" placeholder="e.g. 3.04 or 1.6-2.3"></div></div></div>
+  <div class="section"><h3>Process parameters</h3><div class="formgrid">${inp('feed','GH feed (TPH)')}${inp('rpm','RPM','step="1"')}${inp('current','Main current (Amp)')}${inp('dds','DDS current (A)')}${inp('sds','SDS current (A)')}<div class="field"><label>Girth gear lubrication system</label><select name="girth"><option>Running OK</option><option>Low level</option><option>Not running</option><option>Needs attention</option></select></div></div></div>
+  <div class="formgrid"><div class="field full"><label>Equipment condition</label><select name="condition"><option>Normal operation</option><option>Under observation</option><option>Abnormal - action required</option></select></div></div>
+  <div class="field"><label>Remarks</label><textarea name="remarks" rows="3"></textarea></div><div class="field"><label>Photos (up to 3)</label><input name="photos" type="file" accept="image/*" multiple></div>
+  <button class="btn" type="submit">Save temperature reading</button>
+  <details style="margin-top:14px"><summary style="font-weight:700;cursor:pointer">Temperature alarm limits (now: warning ${L.warning}°C · alarm ${L.alarm}°C)</summary><div class="formgrid" style="margin-top:8px"><div class="field"><label>Warning at (°C)</label><input id="mxTW" type="number" step="0.1" value="${L.warning}"></div><div class="field"><label>Alarm at (°C)</label><input id="mxTA" type="number" step="0.1" value="${L.alarm}"></div></div><button type="button" class="btn secondary small" onclick="mxT.saveLimits()" style="margin-top:8px">Save limits</button><p class="sub">Defaults are placeholders. Enter your approved site limits.</p></details></form>`;
+ }
+ const inR=r=>(!T.from||r.date>=T.from)&&(!T.to||r.date<=T.to);
+ function history(){
+  const all=list(),rows=all.filter(inR);
+  const bar=`<div class="panel section wofilter"><div class="dates" style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><div><label style="font-size:11px;font-weight:700">From date</label><input type="date" value="${T.from}" onchange="mxT.setD('from',this.value)"></div><div><label style="font-size:11px;font-weight:700">To date</label><input type="date" value="${T.to}" ${T.from?`min="${T.from}"`:''} onchange="mxT.setD('to',this.value)"></div></div><div class="row" style="gap:6px;flex-wrap:wrap;margin-top:8px"><button class="btn ghost small" onclick="mxT.setD('from','');mxT.setD('to','')">All dates</button><button class="btn secondary small" onclick="mxT.csv()">Export CSV</button></div><p class="sub">${rows.length} of ${all.length} readings${T.from||T.to?` · ${T.from||'any'} to ${T.to||'any'}`:''}</p></div>`;
+  const del=rows.length?`<div class="panel section"><div class="row" style="gap:7px;flex-wrap:wrap;align-items:center"><button class="btn secondary small" onclick="mxT.toggle()">${T.mode?'✓ Done selecting':'☑ Select'}</button>${T.mode?`<button class="btn secondary small" onclick="mxT.selAll()">Select all (${rows.length})</button><button class="btn ghost small" onclick="mxT.clr()">Clear</button><button class="btn danger small" ${T.sel.size?'':'disabled'} onclick="mxT.ask([...mxT.sel()])">🗑 Delete selected (${T.sel.size})</button>`:''}<button class="btn danger small" onclick="mxT.askShown()">🗑 Delete all shown (${rows.length})</button></div></div>`:'';
+  const cards=rows.map(r=>{const o=overall(r),m=worst(r);
+   return `<article class="record ${T.sel.has(r.id)?'mxpicked':''}">${T.mode?`<label class="mxsel"><input type="checkbox" ${T.sel.has(r.id)?'checked':''} onchange="mxT.pick('${r.id}',this.checked)"> Select this record</label>`:''}<div class="recordhead"><div><h3>${esc(dmy(r.date))} · ${esc(r.shift)}${r.time?' · '+esc(t12(r.time)):''}</h3><p>${esc(r.id)} · ${esc(r.person)}</p></div>${badge(o)}</div>
+   <p>${esc(r.status||'')} · Max temp ${m==null?'--':m+'°C'} · ${esc(r.condition||'')}</p>
+   <div class="tmpgrid"><span><b>Pinion</b> DE ${esc(r.temps.pinionDE||'--')} / NDE ${esc(r.temps.pinionNDE||'--')}</span><span><b>T-1 FP</b> ${esc(pair(r.temps.t1fp_a,r.temps.t1fp_b))}</span><span><b>T-1 PT</b> ${esc(pair(r.temps.t1pt_a,r.temps.t1pt_b))}</span><span><b>T-2 FP</b> ${esc(pair(r.temps.t2fp_a,r.temps.t2fp_b))}</span><span><b>T-2 PT</b> ${esc(pair(r.temps.t2pt_a,r.temps.t2pt_b))}</span><span><b>RPM</b> ${esc(r.rpm||'--')} · <b>A</b> ${esc(r.current||'--')}</span></div>
+   ${r.remarks?`<p>${esc(r.remarks)}</p>`:''}<div class="recordfoot"><span class="meta">${r.photos?.length||0} photos</span><span style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn secondary small" onclick="mxT.report('${r.id}')">📄 Report</button><button class="btn danger small" onclick="mxT.ask(['${r.id}'])">🗑 Delete</button></span></div></article>`}).join('');
+  return bar+del+`<div class="cardlist">${cards||'<div class="panel empty"><b>No temperature readings</b>Save one from Temp Entry, or widen the date range.</div>'}</div>`;
+ }
+ function tempPage(){
+  const a=list(),l=a[0],o=l?overall(l):'Not entered',m=l?worst(l):null;
+  return `${heading('Scrubber Temperature Monitoring','Pinion, support roller bearing and process readings','')}
+  <div class="grid"><div class="stat"><div class="stat-top">Saved readings</div><strong>${a.length}</strong></div><div class="stat"><div class="stat-top">Latest max temp</div><strong>${m==null?'--':m+'°C'}</strong></div><div class="stat"><div class="stat-top">Latest status</div><strong style="color:${col(o)}">${o}</strong></div></div>
+  ${tabs()}${scrubTab==='tempEntry'?entry():history()}
+  <div class="notice">Default temperature limits are placeholders. Set approved site limits under Temp Entry.</div>`;
+ }
+ const sp0=scrubberPage;
+ scrubberPage=function(){return TEMPTABS.includes(scrubTab)?tempPage():sp0.apply(this,arguments)};
+
+ /* ---------- actions ---------- */
+ function undoBar(msg){
+  let e=document.getElementById('mxUndo');if(!e){e=document.createElement('div');e.id='mxUndo';e.setAttribute('role','status');document.body.appendChild(e)}
+  e.innerHTML='';e.appendChild($('span',null,msg));e.appendChild($('button',null,'Undo',()=>{if(!undoSnap)return;db.scrubberTemps=undoSnap;undoSnap=null;save();e.className='';render();v16Toast('Restored')}));
+  e.className='show';clearTimeout(undoTimer);undoTimer=setTimeout(()=>{e.className='';undoSnap=null},9000);
+ }
+ const shown=()=>list().filter(inR).map(r=>r.id);
+ function remove(ids){const s=new Set(ids);undoSnap=list().slice();const n=ids.length;db.scrubberTemps=list().filter(r=>!s.has(r.id));T.sel.clear();save();render();undoBar(n+(n>1?' temperature readings':' temperature reading')+' deleted')}
+ function ask(ids){
+  const n=ids.length;if(!n)return;
+  const r=n===1?list().find(x=>x.id===ids[0]):null;
+  showModal('Delete '+(n>1?n+' temperature readings':'temperature reading')+'?',`<p style="font-size:13px;line-height:1.5;margin:0 0 6px">Delete ${r?`<b>${esc(dmy(r.date))} · ${esc(r.shift)}</b>`:`these <b>${n}</b> readings`} from this device? You can undo right after deleting.</p><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn danger" id="mxTGo">Delete${n>1?' '+n:''}</button></div>`);
+  document.getElementById('mxTGo').onclick=()=>{closeModal();remove(ids)};
+ }
+ function summary(r){
+  const L=[`SCRUBBER STATUS REPORT`,`Date: ${dmy(r.date)} | Shift: ${r.shift}${r.time?' | Time: '+t12(r.time):''}`,`Scrubber status: ${r.status||'--'}`,``,`Pinion temperature: DE ${r.temps.pinionDE||'--'}°C | NDE ${r.temps.pinionNDE||'--'}°C`,`T-1 support roller bearing: F/D towards FP ${pair(r.temps.t1fp_a,r.temps.t1fp_b)}°C | F/D towards PT ${pair(r.temps.t1pt_a,r.temps.t1pt_b)}°C`,`T-2 support roller bearing: F/D towards FP ${pair(r.temps.t2fp_a,r.temps.t2fp_b)}°C | F/D towards PT ${pair(r.temps.t2pt_a,r.temps.t2pt_b)}°C`];
+  if(r.gbVib||r.pnVib)L.push(`Vibration: Gear box ${r.gbText||r.gbVib||'--'} mm/s | Pinion ${r.pnText||r.pnVib||'--'} mm/s`);
+  L.push(`GH feed ${r.feed||'--'} TPH | RPM ${r.rpm||'--'} | Current ${r.current||'--'} A | DDS ${r.dds||'--'} A | SDS ${r.sds||'--'} A`,`Girth gear lubrication: ${r.girth||'--'}`,`Equipment condition: ${r.condition||'--'} (Temperature ${overall(r)})`);
+  if(r.remarks)L.push(`Remarks: ${r.remarks}`);return L.join('\n');
+ }
+ function report(id){
+  const r=list().find(x=>x.id===id);if(!r)return;
+  const row=(lab,val,s)=>`<div class="r"><span>${lab}</span><span class="v ${s||''}">${val}</span></div>`;
+  const ps=k=>tState(r.temps[k]),pw=(a,b)=>{const x=[ps(a),ps(b)];return x.includes('Alarm')?'Alarm':x.includes('Warning')?'Warning':''};
+  const o=overall(r);
+  showModal('Scrubber status report',`<div class="trpt"><div class="hd">SCRUBBER STATUS REPORT</div><div class="meta"><span>Date: ${esc(dmy(r.date))}</span><span>${esc(r.shift)}</span>${r.time?`<span>${esc(t12(r.time))}</span>`:''}</div>
+  <div class="sec">Scrubber status</div>${row('Status',esc(r.status||'--'))}
+  <div class="sec">Pinion temperature</div>${row('DE',esc(r.temps.pinionDE||'--')+'°C',ps('pinionDE')==='Normal'?'':ps('pinionDE'))}${row('NDE',esc(r.temps.pinionNDE||'--')+'°C',ps('pinionNDE')==='Normal'?'':ps('pinionNDE'))}
+  <div class="sec">T-1 support roller bearing block temperature</div>${row('F/D towards FP',esc(pair(r.temps.t1fp_a,r.temps.t1fp_b))+'°C',pw('t1fp_a','t1fp_b'))}${row('F/D towards PT',esc(pair(r.temps.t1pt_a,r.temps.t1pt_b))+'°C',pw('t1pt_a','t1pt_b'))}
+  <div class="sec">T-2 support roller bearing block temperature</div>${row('F/D towards FP',esc(pair(r.temps.t2fp_a,r.temps.t2fp_b))+'°C',pw('t2fp_a','t2fp_b'))}${row('F/D towards PT',esc(pair(r.temps.t2pt_a,r.temps.t2pt_b))+'°C',pw('t2pt_a','t2pt_b'))}
+  ${(r.gbVib||r.pnVib)?`<div class="sec">Vibration monitoring</div>${row('Gear box',esc(r.gbText||r.gbVib||'--')+' mm/s')}${row('Pinion',esc(r.pnText||r.pnVib||'--')+' mm/s')}`:''}
+  <div class="sec">Process parameters</div>${row('GH feed',esc(r.feed||'--')+' TPH')}${row('RPM',esc(r.rpm||'--'))}${row('Current',esc(r.current||'--')+' Amp')}${row('DDS / SDS current',esc(r.dds||'--')+' A / '+esc(r.sds||'--')+' A')}${row('Girth gear lubrication',esc(r.girth||'--'))}
+  <div class="foot">Equipment condition: ${esc(r.condition||'--')}<span class="${o}">Temperature ${o}</span></div></div>
+  ${r.remarks?`<p style="margin-top:8px"><b>Remarks:</b> ${esc(r.remarks)}</p>`:''}${(r.photos||[]).map(x=>`<img src="${x}" style="max-width:100%;margin-top:8px;border-radius:10px">`).join('')}
+  <div class="actions"><button class="btn ghost" onclick="closeModal()">Close</button><button class="btn" id="mxTShare">Share summary</button></div>`);
+  document.getElementById('mxTShare').onclick=async()=>{const txt=summary(r);try{if(navigator.share){await navigator.share({title:'Scrubber status report',text:txt})}else{await navigator.clipboard.writeText(txt);v16Toast('Summary copied')}}catch(e){try{await navigator.clipboard.writeText(txt);v16Toast('Summary copied')}catch(x){v16Toast('Could not share')}}};
+ }
+ function csv(){
+  const head=['ID','Date','Time','Shift','Technician','Scrubber status',...TP.map(x=>x[1]+' (°C)'),'Gear box vib (mm/s)','Pinion vib (mm/s)','GH feed TPH','RPM','Current A','DDS A','SDS A','Girth gear lubrication','Condition','Temperature status','Remarks'];
+  const rows=list().filter(inR).map(r=>[r.id,r.date,r.time||'',r.shift,r.person,r.status||'',...TP.map(([k])=>r.temps[k]??''),r.gbText||r.gbVib||'',r.pnText||r.pnVib||'',r.feed||'',r.rpm||'',r.current||'',r.dds||'',r.sds||'',r.girth||'',r.condition||'',overall(r),r.remarks||'']);
+  if(!rows.length){v16Toast('No readings to export');return}
+  downloadCSV([head,...rows],'MaintenX_Scrubber_Temperature_'+v17Today()+'.csv');
+ }
+ function save_(e){
+  e.preventDefault();const form=e.target,f=new FormData(form),person=String(f.get('person')||'').trim(),date=f.get('date');
+  if(!date||!person){const k=!date?'date':'person',el=form.elements[k];v16Toast(!date?'Enter the date first.':'Enter the technician / engineer name first.');if(el){el.scrollIntoView({block:'center'});el.focus()}return}
+  const temps={};TP.forEach(([k])=>temps[k]=String(f.get(k)||'').trim());
+  if(!TP.some(([k])=>temps[k]!=='')){v16Toast('Enter at least one temperature.');return}
+  const gb=parseV(f.get('gbVib')),pn=parseV(f.get('pnVib'));
+  if(!gb.ok||!pn.ok){const el=form.elements[!gb.ok?'gbVib':'pnVib'];v16Toast('Vibration: use a number like 2.04 or a range like 1.6-2.3.');if(el){el.scrollIntoView({block:'center'});el.focus()}return}
+  const files=[...(form.elements.photos?.files||[])].slice(0,3),btn=form.querySelector('button[type=submit]'),txt=btn?btn.textContent:'';
+  if(btn){btn.disabled=true;btn.textContent='Saving…'}
+  const fail=m=>{if(btn){btn.disabled=false;btn.textContent=txt}v16Toast(m)};
+  Promise.all(files.map(x=>v17Img(x).catch(()=>null))).then(ph=>{let photos=ph.filter(Boolean);
+   const rec=()=>{const r={id:'TMP-'+Date.now(),date,time:f.get('time'),shift:f.get('shift'),person,status:f.get('status'),temps,gbVib:gb.num,pnVib:pn.num,feed:f.get('feed'),rpm:f.get('rpm'),current:f.get('current'),dds:f.get('dds'),sds:f.get('sds'),girth:f.get('girth'),condition:f.get('condition'),remarks:f.get('remarks'),photos};if(gb.text)r.gbText=gb.text;if(pn.text)r.pnText=pn.text;return r};
+   const tryPut=()=>{list().unshift(rec());try{localStorage.setItem('maintenx_db',JSON.stringify(db));return true}catch(x){list().shift();return false}};
+   let ok=tryPut(),dropped=false;if(!ok&&photos.length){photos=[];dropped=true;ok=tryPut()}
+   if(!ok){fail('NOT saved: phone storage is full. Download a backup, then delete old photos.');return}
+   v16Toast(dropped?'Saved without photos (storage nearly full).':'Temperature reading saved');scrubTab='tempHistory';render()
+  }).catch(()=>fail('Could not save. Please try again.'));
+ }
+ window.mxT={save:save_,report,csv,ask,sel:()=>T.sel,
+  setD:(k,v)=>{T[k]=v;render()},toggle:()=>{T.mode=!T.mode;T.sel.clear();render()},selAll:()=>{shown().forEach(i=>T.sel.add(i));render()},clr:()=>{T.sel.clear();render()},
+  pick:(id,on)=>{on?T.sel.add(id):T.sel.delete(id);render()},askShown:()=>ask(shown()),
+  saveLimits:()=>{const w=parseFloat(document.getElementById('mxTW').value),a=parseFloat(document.getElementById('mxTA').value);if(isNaN(w)||isNaN(a)||w>=a){v16Toast('Warning must be lower than alarm.');return}db.scrubberTempLimits={warning:w,alarm:a};save();v16Toast('Limits saved');render()}};
+
+ /* add the two new buttons to the original scrubber tab row */
+ const r0=render;render=function(){r0.apply(this,arguments);try{
+  if(page==='scrubber'&&!TEMPTABS.includes(scrubTab)){
+   const b=[...document.querySelectorAll('#app .panel.section .row button')].find(x=>x.textContent.trim()==='Alarm Limits');
+   if(b&&!b.parentNode.querySelector('[data-mxtemp]')){[['tempEntry','🌡 Temp Entry'],['tempHistory','🌡 Temp History']].forEach(([k,l])=>{const n=$('button','btn secondary small',l,()=>{scrubTab=k;render()});n.dataset.mxtemp=k;b.parentNode.appendChild(n)})}
+  }}catch(e){console.error('v31',e)}};
+})();
+</script>
+<script>
+/* MaintenX v32: Scrubber Status DASHBOARD (visual report like the shared image) with Save / Share as image */
+(()=>{
+ const W=760,D={id:''};
+ const list=()=>(db.scrubberTemps=db.scrubberTemps||[]);
+ const lim=()=>Object.assign({warning:70,alarm:80},db.scrubberTempLimits||{});
+ const TK=['pinionDE','pinionNDE','t1fp_a','t1fp_b','t1pt_a','t1pt_b','t2fp_a','t2fp_b','t2pt_a','t2pt_b'];
+ const tState=v=>v===''||v==null||isNaN(+v)?null:(+v>=lim().alarm?'Alarm':+v>=lim().warning?'Warning':'Normal');
+ const rank={Normal:0,Warning:1,Alarm:2};
+ const worstOf=a=>a.filter(Boolean).reduce((b,s)=>b==null||rank[s]>rank[b]?s:b,null);
+ const vState=v=>{if(v===''||v==null||isNaN(+v))return null;const l=sLimit('Gearbox Input|H');return +v>=l.alarm?'Alarm':+v>=l.warning?'Warning':'Normal'};
+ const dmy=d=>String(d||'').split('-').reverse().join('/');
+ const t12=t=>{if(!t)return '';const [h,m]=t.split(':');const H=+h;return ((H%12)||12)+':'+m+' '+(H<12?'AM':'PM')};
+ const X=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+ const C={blue:'#0f3f8f',mid:'#1d4fa3',light:'#eaf2fb',Normal:['#e3f6dc','#8fd08a','#14532d','#16a34a'],Warning:['#fff3d6','#e6b84a','#8a5a00','#d08a10'],Alarm:['#fde3e3','#e08080','#9b1c1c','#c24141'],none:['#f1f5f9','#c9d6e2','#44566a','#7b8da0']};
+ const col=s=>C[s||'none'];
+ const FONT='Arial,Helvetica,sans-serif';
+
+ const rect=(x,y,w,h,rx,fill,stroke,sw)=>`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${rx}" fill="${fill}"${stroke?` stroke="${stroke}" stroke-width="${sw||2}"`:''}/>`;
+ const text=(x,y,s,size,fill,weight,anchor)=>`<text x="${x}" y="${y}" font-size="${size}" fill="${fill}" font-weight="${weight||700}" text-anchor="${anchor||'start'}" font-family="${FONT}">${X(s)}</text>`;
+ const bar=(y,title,size)=>rect(20,y,720,46,10,C.blue)+text(380,y+31,title,size||24,'#fff',800,'middle');
+ const pill=(x,y,w,h,s,state,size)=>{const c=col(state);return rect(x,y,w,h,12,c[0],c[1],2)+text(x+w/2,y+h/2+size*0.36,s,size,c[2],800,'middle')};
+ const thermo=(x,y,state)=>{const c=state==='Alarm'?'#c24141':state==='Warning'?'#d08a10':C.mid;return rect(x+9,y,10,32,5,'#fff',C.mid,2)+rect(x+11,y+14,6,20,3,c)+`<circle cx="${x+14}" cy="${y+38}" r="10" fill="${c}" stroke="${C.mid}" stroke-width="2"/>`};
+ const secBg=(y,h)=>rect(20,y,720,h,12,'#fff','#bcd0e6',2);
+ const ang=f=>Math.PI*(1-f);
+ const arc=(cx,cy,r,f0,f1,color)=>{const a=ang(f0),b=ang(f1),p=(t)=>[cx+r*Math.cos(t),cy-r*Math.sin(t)];const s=p(a),e=p(b);return `<path d="M${s[0].toFixed(1)} ${s[1].toFixed(1)} A${r} ${r} 0 0 1 ${e[0].toFixed(1)} ${e[1].toFixed(1)}" fill="none" stroke="${color}" stroke-width="12"/>`};
+ const gauge=(cx,cy,r,v)=>{const l=sLimit('Gearbox Input|H'),max=l.alarm*1.4,fw=l.warning/max,fa=l.alarm/max;const f=v===''||v==null||isNaN(+v)?0:Math.min(1,Math.max(0,+v/max)),t=ang(f);
+  return arc(cx,cy,r,0,fw,'#16a34a')+arc(cx,cy,r,fw,fa,'#eab308')+arc(cx,cy,r,fa,1,'#dc2626')+`<line x1="${cx}" y1="${cy}" x2="${(cx+(r-6)*Math.cos(t)).toFixed(1)}" y2="${(cy-(r-6)*Math.sin(t)).toFixed(1)}" stroke="#0f2a4a" stroke-width="5" stroke-linecap="round"/><circle cx="${cx}" cy="${cy}" r="8" fill="#0f2a4a"/>`};
+ const wave=(x0,cy,v,seed)=>{const amp=8+Math.min(34,(+v||0)*8),pts=[];for(let i=0;i<=56;i++){const x=x0+i*5,y=cy+Math.sin(i*1.7+seed)*amp*Math.cos(i*0.33+seed)*(0.55+0.45*Math.abs(Math.sin(i*0.9)));pts.push(x.toFixed(1)+','+y.toFixed(1))}return `<polyline points="${pts.join(' ')}" fill="none" stroke="${C.mid}" stroke-width="2"/>`};
+ const check=(cx,cy,r,state)=>{const c=col(state)[3];return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${c}"/>`+(state==='Normal'||!state&&false?`<path d="M${cx-r*0.45} ${cy} L${cx-r*0.1} ${cy+r*0.38} L${cx+r*0.5} ${cy-r*0.4}" fill="none" stroke="#fff" stroke-width="${Math.max(3,r*0.22)}" stroke-linecap="round" stroke-linejoin="round"/>`:text(cx,cy+r*0.42,'!',r*1.3,'#fff',900,'middle'))};
+ const pair=(a,b)=>`${a===''||a==null?'--':a} / ${b===''||b==null?'--':b}°C`;
+
+ function dash(r){
+  const T=r.temps||{},o=[];let y=14;
+  /* header */
+  o.push(`<circle cx="75" cy="${y+56}" r="48" fill="#fff" stroke="${C.mid}" stroke-width="5"/>`+text(75,y+67,'IOBP',30,C.blue,900,'middle'));
+  o.push(rect(140,y+10,600,64,12,C.blue)+text(440,y+54,'SCRUBBER STATUS REPORT',34,'#fff',800,'middle'));
+  o.push(rect(140,y+86,600,46,23,C.light,C.mid,2)+text(165,y+117,'DATE : '+dmy(r.date),20,C.blue)+text(395,y+117,'SHIFT : '+(r.shift||''),20,C.blue)+text(560,y+117,'TIME : '+(t12(r.time)||'--'),20,C.blue));
+  y+=152;
+  /* scrubber status */
+  const running=!/stop|maint|down|trip|break/i.test(r.status||''),ss=running?'Normal':'Warning',sc=col(ss);
+  o.push(bar(y,'SCRUBBER STATUS'));y+=56;
+  const stx=String(r.status||'--').toUpperCase(),ssz=stx.length>22?22:stx.length>16?28:32;
+  o.push(rect(20,y,720,84,14,sc[0],sc[1],2)+check(80,y+42,26,ss)+`<line x1="125" y1="${y+14}" x2="125" y2="${y+70}" stroke="${sc[1]}" stroke-width="2"/>`+text(145,y+42+ssz*0.36,stx,ssz,sc[2],800));
+  y+=104;
+  /* photo */
+  if(r.photos&&r.photos[0]){o.push(`<defs><clipPath id="phc"><rect x="20" y="${y}" width="720" height="300" rx="14"/></clipPath></defs><image href="${r.photos[0]}" x="20" y="${y}" width="720" height="300" preserveAspectRatio="xMidYMid slice" clip-path="url(#phc)"/>`+rect(20,y,720,300,14,'none',C.mid,4));y+=320}
+  /* pinion temperature */
+  o.push(secBg(y,46+2*70+10)+bar(y,'PINION TEMPERATURE'));
+  [['DE','pinionDE'],['NDE','pinionNDE']].forEach(([lab,k],i)=>{const ry=y+56+i*70,s=tState(T[k]);o.push(thermo(46,ry+6,s)+text(110,ry+42,lab,30,'#12263a',800)+text(215,ry+42,':',30,'#12263a',800)+pill(260,ry+2,440,58,(T[k]===''||T[k]==null?'--':T[k])+'°C',s,36))});
+  y+=46+2*70+10+16;
+  /* T-1 / T-2 */
+  const tbl=(title,kfp,kpt)=>{o.push(secBg(y,46+36+2*64+10)+bar(y,title,21));
+   o.push(rect(20,y+46,720,36,0,'#3b78c9')+text(180,y+72,'LOCATION',20,'#fff',800,'middle')+text(540,y+72,'TEMPERATURE',20,'#fff',800,'middle'));
+   [['F/D Towards FP',kfp],['F/D Towards PT',kpt]].forEach(([lab,[a,b]],i)=>{const ry=y+86+i*64,s=worstOf([tState(T[a]),tState(T[b])]);o.push(thermo(46,ry+4,s)+text(100,ry+38,lab,25,'#12263a',800)+pill(370,ry+2,340,54,pair(T[a],T[b]),s,32))});
+   y+=46+36+2*64+10+16};
+  tbl('T-1 SUPPORT ROLLER BEARING BLOCK TEMPERATURE',['t1fp_a','t1fp_b'],['t1pt_a','t1pt_b']);
+  tbl('T-2 SUPPORT ROLLER BEARING BLOCK TEMPERATURE',['t2fp_a','t2fp_b'],['t2pt_a','t2pt_b']);
+  /* vibration */
+  o.push(secBg(y,46+2*140+6)+bar(y,'VIBRATION MONITORING'));
+  [['GEAR BOX VIBRATION',r.gbVib,r.gbText],['PINION VIBRATION',r.pnVib,r.pnText]].forEach(([lab,v,t],i)=>{const by=y+54+i*140;o.push(text(40,by+28,lab,22,'#12263a',800)+gauge(130,by+112,62,v)+text(250,by+92,(t||v||'--'),(t||'').length>5?40:52,'#12263a',800)+text(250,by+122,'mm/s',22,'#12263a',700)+wave(430,by+84,v,i*2.3+1))});
+  y+=46+2*140+6+16;
+  /* process */
+  o.push(secBg(y,46+130+10)+bar(y,'PROCESS PARAMETERS'));
+  [['GH FEED',r.feed,'TPH'],['RPM',r.rpm,''],['CURRENT',r.current,'Amp']].forEach(([lab,v,u],i)=>{const cx=20+120+i*240;o.push(text(cx,y+84,lab,22,'#12263a',800,'middle')+text(cx,y+138,v||'--',54,'#14532d',900,'middle')+text(cx,y+162,u,22,'#12263a',700,'middle'))});
+  y+=46+130+10+16;
+  /* DDS / SDS */
+  [['DDS CURRENT :-',r.dds,20],['SDS CURRENT :-',r.sds,390]].forEach(([lab,v,x])=>{o.push(rect(x,y,350,100,12,'#fff','#bcd0e6',2)+text(x+20,y+34,lab,22,'#12263a',800)+text(x+175,y+82,(v?v+'A':'--'),46,'#14532d',900,'middle'))});
+  y+=116;
+  /* girth gear */
+  const gok=/ok/i.test(r.girth||''),gs=gok?'Normal':(r.girth?'Warning':null);
+  o.push(rect(20,y,720,90,12,'#fff','#bcd0e6',2)+`<circle cx="75" cy="${y+45}" r="24" fill="none" stroke="${C.mid}" stroke-width="8" stroke-dasharray="7 5"/><circle cx="75" cy="${y+45}" r="11" fill="${C.mid}"/>`+text(125,y+36,'GIRTH GEAR LUBRICATION SYSTEM',22,C.blue,800)+text(125,y+72,String(r.girth||'--').toUpperCase(),32,col(gs)[2],900));
+  y+=106;
+  /* footer */
+  const ts=worstOf(TK.map(k=>tState(T[k]))),vs=worstOf([vState(r.gbVib),vState(r.pnVib)]);
+  const cond=r.condition||'--',cs=/abnormal/i.test(cond)?'Alarm':/observ/i.test(cond)?'Warning':'Normal',cc=col(cs);
+  o.push(rect(20,y,720,70,12,C.blue)+text(40,y+43,'EQUIPMENT CONDITION :',22,'#fff',800)+rect(350,y+10,370,50,10,cc[3])+text(535,y+45,cond.toUpperCase(),26,'#fff',900,'middle'));
+  y+=82;
+  const chk=[[ts,'TEMPERATURE '+(ts?ts.toUpperCase():'--')],[vs,'VIBRATION '+(vs==='Normal'?'ACCEPTABLE':vs==='Warning'?'WARNING':vs==='Alarm'?'HIGH':'--')],[running?'Normal':'Warning',running?'MACHINE RUNNING STABLE':'MACHINE NOT RUNNING']];
+  o.push(rect(20,y,720,70,12,'#fff','#bcd0e6',2));
+  chk.forEach(([s,t],i)=>{const x=34+i*240;o.push(check(x+16,y+35,16,s)+text(x+40,y+31,t.split(' ')[0],16,'#12263a',800)+text(x+40,y+51,t.split(' ').slice(1).join(' '),16,col(s)[2],800))});
+  y+=70+14;
+  const H=y;
+  return{H,inner:`<rect x="3" y="3" width="${W-6}" height="${H-6}" rx="16" fill="#fff" stroke="${C.mid}" stroke-width="3"/>`+o.join('')};
+ }
+ const svgInline=r=>{const d=dash(r);return `<svg viewBox="0 0 ${W} ${d.H}" width="100%" xmlns="http://www.w3.org/2000/svg" style="display:block;border-radius:14px;background:#fff">${d.inner}</svg>`};
+ function toPNG(r){return new Promise((res,rej)=>{const d=dash(r),svg=`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${W}" height="${d.H}" viewBox="0 0 ${W} ${d.H}">${d.inner}</svg>`,img=new Image();img.onload=()=>{const c=document.createElement('canvas');c.width=W*2;c.height=d.H*2;const x=c.getContext('2d');x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.drawImage(img,0,0,c.width,c.height);c.toBlob(b=>b?res(b):rej(new Error('blob')),'image/png')};img.onerror=()=>rej(new Error('img'));img.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg)})}
+ const fname=r=>'Scrubber_Status_'+(r.date||'')+'_'+String(r.shift||'').replace(/[^A-Za-z0-9]+/g,'_')+'.png';
+ async function saveImg(id){const r=list().find(x=>x.id===id);if(!r)return;try{const b=await toPNG(r),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=fname(r);document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),4000);v16Toast('Image saved')}catch(e){v16Toast('Could not create the image on this device.')}}
+ async function shareImg(id){const r=list().find(x=>x.id===id);if(!r)return;try{const b=await toPNG(r),f=new File([b],fname(r),{type:'image/png'});if(navigator.canShare&&navigator.canShare({files:[f]})){await navigator.share({files:[f],title:'Scrubber status report'})}else{await saveImg(id)}}catch(e){if(e&&e.name==='AbortError')return;v16Toast('Could not share the image.')}}
+
+ /* ---------- tab / page ---------- */
+ const tabs=()=>`<div class="panel section"><div class="row" style="gap:7px;flex-wrap:wrap">${[['entry','Daily Entry'],['history','History'],['trends','Trends'],['limits','Alarm Limits'],['tempEntry','🌡 Temp Entry'],['tempHistory','🌡 Temp History'],['tempDash','📊 Temp Dashboard']].map(([k,l])=>`<button class="btn ${scrubTab===k?'':'secondary'} small" onclick="scrubTab='${k}';render()">${l}</button>`).join('')}</div></div>`;
+ function dashPage(){
+  const a=list(),r=a.find(x=>x.id===D.id)||a[0];
+  const sel=a.length?`<div class="panel section"><label style="font-size:11px;font-weight:700">Reading</label><select onchange="mxD.pick(this.value)" style="width:100%">${a.map(x=>`<option value="${X(x.id)}" ${r&&x.id===r.id?'selected':''}>${X(dmy(x.date))} · ${X(x.shift)}${x.time?' · '+X(t12(x.time)):''} · ${X(x.person)}</option>`).join('')}</select></div>`:'';
+  return `${heading('Scrubber Status Dashboard','Visual report of the selected temperature reading','')}${tabs()}${r?sel+`<div style="margin:0 0 10px">${svgInline(r)}</div><div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn" onclick="mxD.share('${r.id}')">Share image</button><button class="btn secondary" onclick="mxD.save('${r.id}')">Save image</button></div>`:'<div class="panel empty"><b>No temperature readings yet</b>Save one from Temp Entry and the dashboard appears here.</div>'}`;
+ }
+ const sp1=scrubberPage;
+ scrubberPage=function(){return scrubTab==='tempDash'?dashPage():sp1.apply(this,arguments)};
+ window.mxD={pick:id=>{D.id=id;render()},save:saveImg,share:shareImg};
+ if(window.mxT)window.mxT.report=id=>{D.id=id;scrubTab='tempDash';render()};
+
+ /* add the dashboard button to the other scrubber tab rows */
+ const r0=render;render=function(){r0.apply(this,arguments);try{
+  if(page==='scrubber'&&scrubTab!=='tempDash'){
+   const b=[...document.querySelectorAll('#app .panel.section .row button')].find(x=>x.textContent.trim()==='Alarm Limits');
+   if(b&&!b.parentNode.querySelector('[data-mxdash]')){const n=document.createElement('button');n.className='btn secondary small';n.textContent='📊 Temp Dashboard';n.dataset.mxdash='1';n.onclick=()=>{scrubTab='tempDash';render()};b.parentNode.appendChild(n)}
+  }}catch(e){console.error('v32',e)}};
+})();
+</script>
 </body></html>
