@@ -1621,4 +1621,153 @@ function v21Info(ti){if(!db.scrubberReadings?.length){alert('Save at least one s
  const r0=render;render=function(){r0.apply(this,arguments);try{decorate()}catch(e){console.error('v28',e)}};
 })();
 </script>
+<script>
+/* MaintenX v29: work order upgrades - delete (single/multi/all shown + undo), completion details & photos, date filter */
+(()=>{
+ const W={from:'',to:'',by:'date',mode:false,sel:new Set(),vis:[]};
+ let undoSnap=null,undoTimer=null,draft=[];
+ const $=(t,c,x,f)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;if(f)e.onclick=f;return e};
+ const st=document.createElement('style');
+ st.textContent='#mxUndo{position:fixed;left:50%;bottom:92px;transform:translateX(-50%);display:none;align-items:center;gap:12px;background:#082d50;color:#fff;padding:9px 12px 9px 15px;border-radius:12px;font-size:12px;z-index:70;box-shadow:0 6px 20px #06274655;max-width:92vw}#mxUndo.show{display:flex}#mxUndo button{background:#fff;color:#082d50;border:0;border-radius:8px;padding:6px 11px;font-weight:700;font-size:12px;cursor:pointer}.mxsel{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:700;margin:0 0 8px;color:var(--navy)}.mxsel input{width:18px;height:18px}article.record.mxpicked{outline:2px solid var(--red)}.wofilter .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.wofilter .dates{display:grid;grid-template-columns:1fr 1fr;gap:8px}.wofilter label{font-size:11px;font-weight:700;color:var(--muted);display:block;margin-bottom:3px}.wodone{background:#f3f8fc;border-radius:10px;padding:9px 10px;margin:8px 0;font-size:12px;line-height:1.5}.wodone b{color:var(--navy)}.wophotos{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}.wophotos .ph{position:relative}.wophotos img{width:78px;height:78px;object-fit:cover;border-radius:9px;border:1px solid var(--line);cursor:pointer}.wophotos .x{position:absolute;top:-6px;right:-6px;width:22px;height:22px;border-radius:50%;border:0;background:#c24141;color:#fff;font-size:13px;line-height:1;cursor:pointer}';
+ document.head.appendChild(st);
+
+ /* ---------- date filter (wraps ordersPage; list, counts and dashboard follow the range) ---------- */
+ const dateOf=x=>W.by==='completedAt'?(x.completedAt||(x.status==='Completed'?x.date:'')||''):(x.date||'');
+ const inRange=x=>{if(!W.from&&!W.to)return true;const d=dateOf(x);if(!d)return false;return(!W.from||d>=W.from)&&(!W.to||d<=W.to)};
+ const o0=ordersPage;
+ ordersPage=function(){const all=db.orders;db.orders=all.filter(inRange);try{return o0.apply(this,arguments)}finally{db.orders=all}};
+ const fmt=d=>v17Date(d);
+ const preset=k=>{const t=new Date(),e=new Date(t);
+  if(k==='today'){W.from=W.to=fmt(t)}
+  else if(k==='7'){e.setDate(e.getDate()-6);W.from=fmt(e);W.to=fmt(t)}
+  else if(k==='month'){W.from=fmt(new Date(t.getFullYear(),t.getMonth(),1));W.to=fmt(t)}
+  else{W.from=W.to=''}
+  render()};
+
+ /* ---------- delete + undo ---------- */
+ function remove(ids){
+  const set=new Set(ids);
+  undoSnap={orders:db.orders.slice(),history:db.history.slice()};
+  const n=db.orders.filter(x=>set.has(x.id)).length;
+  db.orders=db.orders.filter(x=>!set.has(x.id));
+  db.history=db.history.filter(h=>!set.has(h.id));
+  W.sel.clear();save();render();undoBar(n+(n>1?' work orders':' work order')+' deleted');
+ }
+ function undoBar(msg){
+  let e=document.getElementById('mxUndo');if(!e){e=document.createElement('div');e.id='mxUndo';e.setAttribute('role','status');document.body.appendChild(e)}
+  e.innerHTML='';e.appendChild($('span',null,msg));e.appendChild($('button',null,'Undo',()=>{const u=undoSnap;if(!u)return;db.orders=u.orders;db.history=u.history;undoSnap=null;save();e.className='';render();v16Toast('Restored')}));
+  e.className='show';clearTimeout(undoTimer);undoTimer=setTimeout(()=>{e.className='';undoSnap=null},9000);
+ }
+ function ask(ids){
+  const n=ids.length;if(!n)return;
+  const x=n===1?db.orders.find(o=>o.id===ids[0]):null;
+  const what=x?`<b>${esc(x.id)} · ${esc(x.title)}</b>`:`these <b>${n}</b> work orders`;
+  showModal('Delete '+(n>1?n+' work orders':'work order')+'?',`<p style="font-size:13px;line-height:1.5;margin:0 0 6px">Delete ${what}? Photos, completion details and the matching entry in Completed work history are removed too.</p><p class="sub">You can undo right after deleting.</p><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn danger" id="woGo">Delete${n>1?' '+n:''}</button></div>`);
+  document.getElementById('woGo').onclick=()=>{closeModal();remove(ids)};
+ }
+
+ /* ---------- completion details + photos ---------- */
+ function viewPhoto(src){showModal('Photo',`<img src="${src}" style="width:100%;height:auto;border-radius:10px"><div class="actions"><button class="btn" onclick="closeModal()">Close</button></div>`)}
+ function drawDraft(){
+  const box=document.getElementById('woCur');if(!box)return;box.innerHTML='';
+  draft.forEach((src,i)=>{const p=$('div','ph'),im=document.createElement('img');im.src=src;im.onclick=()=>viewPhoto(src);const x=$('button','x','×',()=>{draft.splice(i,1);drawDraft()});x.type='button';x.setAttribute('aria-label','Remove photo');p.appendChild(im);p.appendChild(x);box.appendChild(p)});
+  if(!draft.length)box.appendChild($('span','sub','No photos yet.'));
+ }
+ function openDetails(id){
+  const x=db.orders.find(o=>o.id===id);if(!x)return;
+  const d=x.details||{};draft=(x.donePhotos||[]).slice();
+  showModal('Work details & photos',`<p><b>${esc(x.title)}</b><br><span class="muted">${esc(x.id)} · ${esc(x.asset)} · ${esc(x.status)}</span></p>
+  <div class="field"><label>Work done / details</label><textarea id="woWork" rows="3" placeholder="e.g. Bearing replaced 6312, greased and aligned">${esc(d.workDone||'')}</textarea></div>
+  <div class="field" style="margin-top:8px"><label>Parts replaced / used</label><input id="woParts" value="${esc(d.parts||'')}" placeholder="e.g. Bearing 6312 x2, V-belt B68"></div>
+  <div class="formgrid" style="margin-top:8px"><div class="field"><label>Hours spent</label><input id="woHours" type="number" min="0" step="0.1" value="${esc(d.hours||'')}"></div><div class="field"><label>Done by</label><input id="woBy" value="${esc(d.by||x.assigned||'')}"></div></div>
+  <div class="field" style="margin-top:8px"><label>Photos after completion (up to 6)</label><div id="woCur" class="wophotos"></div><input id="woNew" type="file" accept="image/*" multiple style="margin-top:8px"></div>
+  <div class="actions"><button class="btn ghost" onclick="closeModal()">Cancel</button><button class="btn" id="woSave">Save details</button></div>`);
+  drawDraft();
+  document.getElementById('woSave').onclick=()=>saveDetails(id);
+ }
+ async function saveDetails(id){
+  const x=db.orders.find(o=>o.id===id);if(!x)return;
+  const btn=document.getElementById('woSave');btn.disabled=true;btn.textContent='Saving…';
+  const files=[...(document.getElementById('woNew').files||[])].slice(0,Math.max(0,6-draft.length));
+  const imgs=(await Promise.all(files.map(f=>v17Img(f).catch(()=>null)))).filter(Boolean);
+  const val=k=>document.getElementById(k).value.trim();
+  const prev={details:x.details,donePhotos:x.donePhotos,h:db.history.map(h=>h.id===id?{details:h.details,donePhotos:h.donePhotos}:null)};
+  x.details={workDone:val('woWork'),parts:val('woParts'),hours:val('woHours'),by:val('woBy'),updated:v17Today()};
+  x.donePhotos=[...draft,...imgs];
+  db.history.forEach(h=>{if(h.id===id){h.details=JSON.parse(JSON.stringify(x.details));h.donePhotos=x.donePhotos.slice()}});
+  try{localStorage.setItem('maintenx_db',JSON.stringify(db))}catch(e){
+   x.details=prev.details;x.donePhotos=prev.donePhotos;db.history.forEach((h,i)=>{if(prev.h[i]){h.details=prev.h[i].details;h.donePhotos=prev.h[i].donePhotos}});
+   btn.disabled=false;btn.textContent='Save details';v16Toast('NOT saved: storage is full. Remove some photos and try again.');return}
+  closeModal();render();v16Toast('Details saved');
+ }
+ const u0=updateOrder;
+ updateOrder=function(id){
+  const x=db.orders.find(o=>o.id===id),prev=x&&x.status,el=document.getElementById('newStatus'),nx=el&&el.value;
+  u0.apply(this,arguments);
+  if(x&&prev!=='Completed'&&nx==='Completed'){v16Toast('Completed - add work details and photos');setTimeout(()=>openDetails(id),60)}
+ };
+ /* show the same details in Completed work history -> View record */
+ const vh0=viewHistory;
+ viewHistory=function(hid){
+  vh0.apply(this,arguments);
+  const h=db.history.find(o=>o.historyId===hid),body=document.getElementById('modalBody');if(!h||!body||(!h.details&&!(h.donePhotos||[]).length))return;
+  const d=h.details||{},box=document.createElement('div');
+  box.innerHTML=`<p><b>Work done:</b> ${esc(d.workDone||'—')}</p>${d.parts?`<p><b>Parts replaced:</b> ${esc(d.parts)}</p>`:''}${d.hours?`<p><b>Hours spent:</b> ${esc(d.hours)}</p>`:''}${d.by?`<p><b>Done by:</b> ${esc(d.by)}</p>`:''}`;
+  if((h.donePhotos||[]).length){const ph=$('div','wophotos');h.donePhotos.forEach(src=>{const im=document.createElement('img');im.src=src;im.onclick=()=>viewPhoto(src);ph.appendChild(im)});box.appendChild(ph)}
+  const act=body.querySelector('.actions');act?body.insertBefore(box,act):body.appendChild(box);
+ };
+
+ /* ---------- page decoration ---------- */
+ const idOf=a=>{const p=a.querySelector('.recordhead p'),id=p?p.textContent.split(' · ')[0].trim():'';return db.orders.some(x=>x.id===id)?id:''};
+ function decorate(){
+  if(page!=='orders')return;
+  const app=document.getElementById('app'),list=app&&app.querySelector('.cardlist');if(!list)return;
+  const arts=[...app.querySelectorAll('article.record')].map(a=>({a,id:idOf(a)})).filter(x=>x.id);
+  W.vis=arts.map(x=>x.id);[...W.sel].forEach(id=>{if(!W.vis.includes(id))W.sel.delete(id)});
+  /* date filter panel */
+  const fp=$('div','panel section wofilter'),dr=$('div','dates');
+  const mkDate=(lab,key)=>{const w=document.createElement('div'),l=$('label',null,lab),i=document.createElement('input');i.type='date';i.value=W[key];if(key==='to'&&W.from)i.min=W.from;i.onchange=()=>{W[key]=i.value;render()};w.appendChild(l);w.appendChild(i);return w};
+  dr.appendChild(mkDate('From date','from'));dr.appendChild(mkDate('To date','to'));fp.appendChild(dr);
+  const by=document.createElement('select');by.className='filter';by.style.marginTop='8px';by.innerHTML='<option value="date">Filter by created date</option><option value="completedAt">Filter by completed date</option>';by.value=W.by;by.onchange=()=>{W.by=by.value;render()};fp.appendChild(by);
+  const chips=$('div','chips');[['Today','today'],['Last 7 days','7'],['This month','month'],['All dates','all']].forEach(([t,k])=>chips.appendChild($('button','btn ghost small',t,()=>preset(k))));fp.appendChild(chips);
+  const shown=arts.length;fp.appendChild($('p','sub',(W.from||W.to?`Date range ${W.from||'any'} to ${W.to||'any'} · `:'')+`${shown} of ${W.total||''}`));
+  list.parentNode.insertBefore(fp,list);
+  /* bulk bar */
+  if(arts.length){
+   const bar=$('div','panel section'),row=$('div','row');row.style.cssText='gap:7px;flex-wrap:wrap;align-items:center';
+   row.appendChild($('button','btn secondary small',W.mode?'✓ Done selecting':'☑ Select',()=>{W.mode=!W.mode;W.sel.clear();render()}));
+   if(W.mode){
+    row.appendChild($('button','btn secondary small','Select all ('+W.vis.length+')',()=>{W.vis.forEach(i=>W.sel.add(i));render()}));
+    row.appendChild($('button','btn ghost small','Clear',()=>{W.sel.clear();render()}));
+    const b=$('button','btn danger small','🗑 Delete selected ('+W.sel.size+')',()=>ask([...W.sel]));if(!W.sel.size)b.disabled=true;row.appendChild(b);
+   }
+   row.appendChild($('button','btn danger small','🗑 Delete all shown ('+W.vis.length+')',()=>ask(W.vis.slice())));
+   bar.appendChild(row);list.parentNode.insertBefore(bar,list);
+  }
+  /* cards */
+  arts.forEach(({a,id})=>{
+   const x=db.orders.find(o=>o.id===id),head=a.querySelector('.recordhead');
+   if(W.mode){
+    const lab=$('label','mxsel'),cb=document.createElement('input');cb.type='checkbox';cb.checked=W.sel.has(id);
+    cb.onchange=()=>{cb.checked?W.sel.add(id):W.sel.delete(id);render()};
+    lab.appendChild(cb);lab.appendChild($('span',null,'Select this work order'));a.insertBefore(lab,a.firstChild);a.classList.toggle('mxpicked',W.sel.has(id));
+   }
+   const d=x.details,ph=x.donePhotos||[];
+   if(head&&((d&&(d.workDone||d.parts||d.hours))||ph.length)){
+    const box=$('div','wodone');
+    if(d&&d.workDone){const p=document.createElement('div');p.innerHTML='<b>Work done:</b> ';p.appendChild(document.createTextNode(d.workDone));box.appendChild(p)}
+    if(d&&d.parts){const p=document.createElement('div');p.innerHTML='<b>Parts:</b> ';p.appendChild(document.createTextNode(d.parts));box.appendChild(p)}
+    if(d&&(d.hours||d.by)){box.appendChild($('div',null,[d.hours?d.hours+' h':'',d.by?'by '+d.by:''].filter(Boolean).join(' · ')))}
+    if(ph.length){const w=$('div','wophotos');ph.forEach(src=>{const im=document.createElement('img');im.src=src;im.alt='Completion photo';im.onclick=()=>viewPhoto(src);w.appendChild(im)});box.appendChild(w)}
+    head.insertAdjacentElement('afterend',box);
+   }
+   const foot=a.querySelector('.recordfoot');
+   if(foot){foot.style.flexWrap='wrap';foot.style.gap='6px';
+    foot.appendChild($('button','btn secondary small',(d||ph.length)?'📝 Edit details':'📝 Details & photos',()=>openDetails(id)));
+    foot.appendChild($('button','btn danger small','🗑 Delete',()=>ask([id])));}
+  });
+ }
+ const r0=render;render=function(){W.total=(db.orders||[]).length;r0.apply(this,arguments);try{decorate()}catch(e){console.error('v29',e)}};
+})();
+</script>
 </body></html>
